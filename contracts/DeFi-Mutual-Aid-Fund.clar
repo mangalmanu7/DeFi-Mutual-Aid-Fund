@@ -13,6 +13,15 @@
 (define-constant VOTING_PERIOD_BLOCKS u144)
 (define-constant APPROVAL_THRESHOLD u60)
 
+(define-constant ERR_NO_REWARDS_AVAILABLE (err u109))
+(define-constant ERR_REWARD_ALREADY_CLAIMED (err u110))
+(define-constant ERR_INSUFFICIENT_STREAK (err u111))
+(define-constant REWARD_POOL_PERCENTAGE u5)
+(define-constant MIN_STREAK_FOR_REWARD u3)
+(define-constant BASE_REWARD_AMOUNT u500000)
+
+(define-data-var reward-pool-balance uint u0)
+
 (define-data-var fund-balance uint u0)
 (define-data-var next-request-id uint u1)
 (define-data-var total-contributors uint u0)
@@ -209,4 +218,78 @@
                 u0))
     u0
   )
+)
+
+(define-map contribution-streaks principal uint)
+(define-map last-contribution-block principal uint)
+(define-map reward-claims principal uint)
+
+(define-public (contribute-with-rewards (amount uint))
+  (begin
+    (try! (contribute amount))
+    (let (
+      (current-block stacks-block-height)
+      (last-block (default-to u0 (map-get? last-contribution-block tx-sender)))
+      (current-streak (default-to u0 (map-get? contribution-streaks tx-sender)))
+      (reward-amount (/ (* amount REWARD_POOL_PERCENTAGE) u100))
+    )
+      (var-set reward-pool-balance (+ (var-get reward-pool-balance) reward-amount))
+      (if (and (> last-block u0) (<= (- current-block last-block) u1008))
+        (map-set contribution-streaks tx-sender (+ current-streak u1))
+        (map-set contribution-streaks tx-sender u1)
+      )
+      (map-set last-contribution-block tx-sender current-block)
+      (ok amount)
+    )
+  )
+)
+
+(define-public (claim-streak-reward)
+  (let (
+    (streak (default-to u0 (map-get? contribution-streaks tx-sender)))
+    (last-claim (default-to u0 (map-get? reward-claims tx-sender)))
+  )
+    (asserts! (>= streak MIN_STREAK_FOR_REWARD) ERR_INSUFFICIENT_STREAK)
+    (asserts! (< last-claim stacks-block-height) ERR_REWARD_ALREADY_CLAIMED)
+    (let (
+      (reward-multiplier (/ streak u3))
+      (reward-amount (* BASE_REWARD_AMOUNT reward-multiplier))
+      (available-rewards (var-get reward-pool-balance))
+    )
+      (asserts! (>= available-rewards reward-amount) ERR_NO_REWARDS_AVAILABLE)
+      (try! (as-contract (stx-transfer? reward-amount tx-sender tx-sender)))
+      (var-set reward-pool-balance (- available-rewards reward-amount))
+      (map-set reward-claims tx-sender stacks-block-height)
+      (ok reward-amount)
+    )
+  )
+)
+
+(define-read-only (get-contributor-streak (contributor principal))
+  (default-to u0 (map-get? contribution-streaks contributor))
+)
+
+(define-read-only (get-reward-pool-balance)
+  (var-get reward-pool-balance)
+)
+
+(define-read-only (calculate-potential-reward (contributor principal))
+  (let (
+    (streak (default-to u0 (map-get? contribution-streaks contributor)))
+    (reward-multiplier (/ streak u3))
+  )
+    (if (>= streak MIN_STREAK_FOR_REWARD)
+      (* BASE_REWARD_AMOUNT reward-multiplier)
+      u0
+    )
+  )
+)
+
+(define-read-only (get-reward-status (contributor principal))
+  {
+    streak: (get-contributor-streak contributor),
+    potential-reward: (calculate-potential-reward contributor),
+    last-claim: (default-to u0 (map-get? reward-claims contributor)),
+    can-claim: (>= (get-contributor-streak contributor) MIN_STREAK_FOR_REWARD)
+  }
 )
