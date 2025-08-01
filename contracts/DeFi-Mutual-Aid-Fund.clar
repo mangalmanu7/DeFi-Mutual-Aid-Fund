@@ -9,6 +9,14 @@
 (define-constant ERR_MINIMUM_CONTRIBUTION_NOT_MET (err u107))
 (define-constant ERR_INVALID_VOTING_PERIOD (err u108))
 
+(define-constant ERR_CANNOT_DELEGATE_TO_SELF (err u112))
+(define-constant ERR_NOT_A_CONTRIBUTOR (err u113))
+(define-constant ERR_DELEGATE_NOT_CONTRIBUTOR (err u114))
+
+(define-map delegation-assignments principal principal)
+(define-map delegated-power principal uint)
+(define-map delegation-count principal uint)
+
 (define-constant MINIMUM_CONTRIBUTION u1000000)
 (define-constant VOTING_PERIOD_BLOCKS u144)
 (define-constant APPROVAL_THRESHOLD u60)
@@ -292,4 +300,95 @@
     last-claim: (default-to u0 (map-get? reward-claims contributor)),
     can-claim: (>= (get-contributor-streak contributor) MIN_STREAK_FOR_REWARD)
   }
+)
+
+(define-public (delegate-voting-power (delegate principal))
+  (let (
+    (delegator-contribution (default-to u0 (map-get? contributors tx-sender)))
+    (delegate-contribution (default-to u0 (map-get? contributors delegate)))
+    (delegator-power (default-to u0 (map-get? contributor-voting-power tx-sender)))
+  )
+    (asserts! (> delegator-contribution u0) ERR_NOT_A_CONTRIBUTOR)
+    (asserts! (> delegate-contribution u0) ERR_DELEGATE_NOT_CONTRIBUTOR)
+    (asserts! (not (is-eq tx-sender delegate)) ERR_CANNOT_DELEGATE_TO_SELF)
+    
+    (match (map-get? delegation-assignments tx-sender)
+      current-delegate (begin
+        (map-set delegated-power current-delegate 
+          (- (default-to u0 (map-get? delegated-power current-delegate)) delegator-power))
+        (map-set delegation-count current-delegate 
+          (- (default-to u1 (map-get? delegation-count current-delegate)) u1))
+      )
+      true
+    )
+    
+    (map-set delegation-assignments tx-sender delegate)
+    (map-set delegated-power delegate 
+      (+ (default-to u0 (map-get? delegated-power delegate)) delegator-power))
+    (map-set delegation-count delegate 
+      (+ (default-to u0 (map-get? delegation-count delegate)) u1))
+    
+    (ok delegate)
+  )
+)
+
+(define-public (revoke-delegation)
+  (match (map-get? delegation-assignments tx-sender)
+    current-delegate (let (
+      (delegator-power (default-to u0 (map-get? contributor-voting-power tx-sender)))
+    )
+      (map-set delegated-power current-delegate 
+        (- (default-to u0 (map-get? delegated-power current-delegate)) delegator-power))
+      (map-set delegation-count current-delegate 
+        (- (default-to u1 (map-get? delegation-count current-delegate)) u1))
+      (map-delete delegation-assignments tx-sender)
+      (ok true)
+    )
+    ERR_UNAUTHORIZED
+  )
+)
+
+(define-public (vote-as-delegate (request-id uint) (support bool))
+  (let (
+    (request (unwrap! (map-get? aid-requests request-id) ERR_REQUEST_NOT_FOUND))
+    (delegate-power (default-to u0 (map-get? contributor-voting-power tx-sender)))
+    (delegated-power-amount (default-to u0 (map-get? delegated-power tx-sender)))
+    (total-power (+ delegate-power delegated-power-amount))
+    (vote-key { request-id: request-id, voter: tx-sender })
+  )
+    (asserts! (> total-power u0) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status request) "pending") ERR_REQUEST_ALREADY_PROCESSED)
+    (asserts! (<= stacks-block-height (+ (get created-at request) VOTING_PERIOD_BLOCKS)) ERR_VOTING_PERIOD_ENDED)
+    (asserts! (is-none (map-get? request-votes vote-key)) ERR_ALREADY_VOTED)
+    
+    (map-set request-votes vote-key { vote: support, voting-power: total-power })
+    
+    (let (
+      (new-votes-for (if support (+ (get votes-for request) total-power) (get votes-for request)))
+      (new-votes-against (if support (get votes-against request) (+ (get votes-against request) total-power)))
+      (new-total-power (+ (get total-voting-power request) total-power))
+    )
+      (map-set aid-requests request-id (merge request {
+        votes-for: new-votes-for,
+        votes-against: new-votes-against,
+        total-voting-power: new-total-power
+      }))
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-delegation-info (contributor principal))
+  {
+    delegate: (map-get? delegation-assignments contributor),
+    delegated-to-me: (default-to u0 (map-get? delegated-power contributor)),
+    delegation-count: (default-to u0 (map-get? delegation-count contributor))
+  }
+)
+
+(define-read-only (get-effective-voting-power (contributor principal))
+  (+ 
+    (default-to u0 (map-get? contributor-voting-power contributor))
+    (default-to u0 (map-get? delegated-power contributor))
+  )
 )
