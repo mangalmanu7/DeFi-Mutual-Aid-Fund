@@ -9,6 +9,11 @@ requirements = []
 path = 'contracts/DeFi-Mutual-Aid-Fund.clar'
 clarity_version = 3
 epoch = 3.1
+
+[contracts.emergency-aid-feature]
+path = 'contracts/emergency-aid-feature.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
